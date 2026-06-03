@@ -56,6 +56,14 @@ documented-only.
 
 ### Firmware
 
+- Added: active firmware-side WebSocket keepalive that detects silent
+  network breaks and triggers the existing reconnect path. A periodic
+  Ping (every 15 s) probes the connection; the Pong response refreshes
+  a liveness timestamp via the new `WebSocket::OnPong` callback
+  (esp-ml307 #49). If no frame of any kind arrives within 60 s, the
+  connection is considered dead and a graceful reconnect is forced —
+  no device reboot required. Closes #239.
+
 - Added an opt-in StackChan safe commissioning mode that holds servo power disabled and skips servo initialization for network and gateway diagnostics.
 
 - Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection.
