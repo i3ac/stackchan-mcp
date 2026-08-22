@@ -43,6 +43,10 @@ documented-only.
   host can detect a device reboot even when the reconnect lands between
   polls and `connected` never reads false.
 
+### Firmware
+
+- Added opt-in, compile-time configurable AXP2101 charge hysteresis for StackChan. The feature is disabled by default; when enabled, startup first allows charging, protection disables it at 70% or above, and charging resumes at 30% or below. An unreadable fuel gauge fails safe to charging enabled. `self.power.set_charge_enabled` and `self.power.get_charge_state` provide manual control and state inspection.
+
 ## [0.17.0] - 2026-07-12
 
 ### Gateway
