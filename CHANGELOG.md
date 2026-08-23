@@ -38,6 +38,12 @@ documented-only.
   
 ### Gateway
 
+- Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
+  alongside Irodori: official REST API with `eleven_v3` as the default
+  model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
+  environment variables, and MP3 decoding through the decoder path shared
+  with Irodori. The API key is read from the environment only and is never
+  persisted or logged. (#372)
 - `take_photo` now returns the captured JPEG as an inline `image/jpeg`
   MCP content block alongside the unchanged text receipt, so LLM clients
   see the frame directly instead of only a file path. Inlining is limited
