@@ -1,0 +1,2 @@
+# Safe commissioning build: servos powerless; network settings are configured on-device.
+CONFIG_STACKCHAN_SAFE_COMMISSIONING=y
