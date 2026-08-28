@@ -2886,12 +2886,20 @@ private:
         io_expander_ = std::unique_ptr<Py32IoExpander>(new Py32IoExpander(i2c_bus_));
 
         // PY32 boots slowly and is unreliable in the first few hundred ms
-        // after power-on. Retry the probe up to 5 times with 500ms gaps —
-        // total budget ~2.5 s, which dominates boot latency by maybe 1.5 s
-        // in the worst case but is still well under the time spent on
-        // I2C scan + LCD panel init that happen earlier.
-        constexpr int kBeginRetries  = 5;
-        constexpr int kBeginDelayMs  = 500;
+        // after power-on. Normal builds use five probes with 500 ms gaps;
+        // safe commissioning builds probe more frequently so VM_EN can be
+        // forced LOW as soon as the expander starts responding.
+#if CONFIG_STACKCHAN_SAFE_COMMISSIONING
+        // Try to take ownership of VM_EN as early as practical. The normal
+        // path waits longer between probes because boot latency is harmless;
+        // commissioning mode instead probes frequently so a PY32 that has
+        // retained its prior output state is driven LOW promptly.
+        constexpr int kBeginRetries = 20;
+        constexpr int kBeginDelayMs = 50;
+#else
+        constexpr int kBeginRetries = 5;
+        constexpr int kBeginDelayMs = 500;
+#endif
         bool   ok = false;
         uint8_t version = 0;
         int     winning_attempt = 0;
@@ -2906,15 +2914,61 @@ private:
         }
 
         if (!ok) {
-            ESP_LOGE(TAG, "PY32 IO expander FAILED after %d attempts; servo will be POWERLESS",
+#if CONFIG_STACKCHAN_SAFE_COMMISSIONING
+            ESP_LOGE(TAG,
+                     "PY32 IO expander FAILED after %d attempts; cannot verify VM_EN LOW, "
+                     "and servo initialization remains disabled",
                      kBeginRetries);
+#else
+            ESP_LOGE(TAG,
+                     "PY32 IO expander FAILED after %d attempts; servo will be POWERLESS",
+                     kBeginRetries);
+#endif
             io_expander_.reset();
             return;
         }
         ESP_LOGI(TAG, "PY32 IO expander READY (version=0x%02X, attempt=%d/%d)",
                  version, winning_attempt, kBeginRetries);
 
-        // Pin 0 = VM EN (servo power switch). Output, pull-up, drive HIGH.
+        // Pin 0 = VM EN (servo power switch).
+#if CONFIG_STACKCHAN_SAFE_COMMISSIONING
+        // Commissioning builds must not energize either servo. Program the
+        // output latch LOW before switching the pin to output, and select a
+        // pull-down so an interrupted/partial setup still fails powerless.
+        constexpr int kPowerOffAttempts = 5;
+        bool power_off_confirmed = false;
+        uint8_t out_low = 0xFF;
+        for (int attempt = 1; attempt <= kPowerOffAttempts; ++attempt) {
+            // Latch LOW first, then select pull-down, then enable output. This
+            // ordering avoids a transient HIGH when the direction changes.
+            bool ok_write = io_expander_->DigitalWrite(0, false);
+            bool ok_pull  = io_expander_->SetPullMode(0, false);
+            bool ok_dir   = io_expander_->SetDirection(0, true);
+            bool ok_read  = io_expander_->ReadOutputLow(&out_low);
+            if (ok_write && ok_pull && ok_dir && ok_read && !(out_low & 0x01)) {
+                power_off_confirmed = true;
+                ESP_LOGW(TAG,
+                         "SAFE COMMISSIONING ACTIVE: VM_EN LOW confirmed "
+                         "(attempt=%d/%d); servo power and firmware-driven "
+                         "head motion are disabled",
+                         attempt, kPowerOffAttempts);
+                break;
+            }
+            ESP_LOGE(TAG,
+                     "SAFE COMMISSIONING: VM_EN LOW attempt %d/%d failed "
+                     "(write=%d pull=%d direction=%d read=%d out=0x%02X)",
+                     attempt, kPowerOffAttempts, ok_write, ok_pull, ok_dir,
+                     ok_read, out_low);
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (!power_off_confirmed) {
+            ESP_LOGE(TAG,
+                     "SAFE COMMISSIONING: could not confirm servo power OFF; "
+                     "aborting IO-expander setup and leaving servos uninitialized");
+            return;
+        }
+#else
+        // Normal mode: output, pull-up, drive HIGH.
         // We track each step so a partial success is reported precisely
         // (e.g. direction set but pull-up failed) — much easier to debug
         // than the previous "all-void, hope it stuck" version.
@@ -2950,6 +3004,7 @@ private:
             ESP_LOGW(TAG, "Servo power writes OK, but readback verify failed "
                           "(can't confirm VM EN level)");
         }
+#endif
 
         // ---- RGB strip init (12x WS2812C on the StackChan base) ----
         // The data line is on PY32 pin 13 (not an ESP32 GPIO); the PY32
@@ -7373,7 +7428,12 @@ public:
         InitializeFt6336TouchPad();
         GetBacklight()->RestoreBrightness();
         InitializeIOExpander();
+#if CONFIG_STACKCHAN_SAFE_COMMISSIONING
+        ESP_LOGW(TAG,
+                 "SAFE COMMISSIONING ACTIVE: skipping servo bus and motion-driver initialization");
+#else
         InitializeServo();
+#endif
         InitializeTouchSettings();
         InitializeSi12tTouch();
         I2cDetect();
