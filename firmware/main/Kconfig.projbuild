@@ -1074,6 +1074,19 @@ endmenu
 
 if BOARD_TYPE_STACKCHAN
 
+config STACKCHAN_SAFE_COMMISSIONING
+    bool "Safe commissioning mode (servo power and motion disabled)"
+    default n
+    help
+        Keep the StackChan servo power switch (PY32 VM_EN pin 0) LOW and
+        skip all servo-bus and motion-driver initialization. Display, WiFi,
+        camera, audio, touch, and RGB remain available for commissioning
+        the gateway without any possibility of firmware-driven head motion.
+
+        This is intended for first boot after flashing and for diagnosing
+        network/gateway configuration. Servo MCP tools report unavailable
+        because the servo subsystem is deliberately not initialized.
+
 choice STACKCHAN_SERVO_DRIVER
     prompt "StackChan Servo Driver"
     default STACKCHAN_SERVO_FEETECH
