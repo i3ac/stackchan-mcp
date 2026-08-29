@@ -113,8 +113,8 @@ async def test_manager_starts_and_stops():
 
 
 @pytest.mark.asyncio
-async def test_manager_start_sets_explicit_websocket_keepalive(monkeypatch, caplog):
-    """The gateway keeps websockets defaults explicit and visible in logs."""
+async def test_manager_start_disables_server_websocket_ping_by_default(monkeypatch, caplog):
+    """Device-side keepalive owns liveness; the gateway doesn't send pings."""
     captured: dict[str, object] = {}
     fake_server = _FakeServeServer()
 
@@ -130,6 +130,8 @@ async def test_manager_start_sets_explicit_websocket_keepalive(monkeypatch, capl
         return fake_server
 
     monkeypatch.setattr(websockets, "serve", fake_serve)
+    monkeypatch.delenv("STACKCHAN_GATEWAY_PING_INTERVAL_S", raising=False)
+    monkeypatch.delenv("STACKCHAN_GATEWAY_PING_TIMEOUT_S", raising=False)
     caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
     mgr = ESP32Manager()
 
@@ -139,11 +141,43 @@ async def test_manager_start_sets_explicit_websocket_keepalive(monkeypatch, capl
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8765
     kwargs = captured["kwargs"]
-    assert kwargs["ping_interval"] == 20
-    assert kwargs["ping_timeout"] == 20
+    assert kwargs["ping_interval"] is None
+    assert kwargs["ping_timeout"] is None
     assert fake_server.closed is True
     assert fake_server.waited is True
-    assert "ping_interval=20 ping_timeout=20" in caplog.text
+    assert "ping_interval=None ping_timeout=None" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_manager_start_allows_explicit_gateway_ping(monkeypatch, caplog):
+    """Operators can opt back into gateway-originated WebSocket pings."""
+    captured: dict[str, object] = {}
+    fake_server = _FakeServeServer()
+
+    async def fake_serve(handler, host, port, **kwargs):
+        captured.update(
+            {
+                "handler": handler,
+                "host": host,
+                "port": port,
+                "kwargs": kwargs,
+            }
+        )
+        return fake_server
+
+    monkeypatch.setattr(websockets, "serve", fake_serve)
+    monkeypatch.setenv("STACKCHAN_GATEWAY_PING_INTERVAL_S", "20")
+    monkeypatch.setenv("STACKCHAN_GATEWAY_PING_TIMEOUT_S", "20")
+    caplog.set_level(logging.INFO, logger="stackchan_mcp.esp32_client")
+    mgr = ESP32Manager()
+
+    await mgr.start("127.0.0.1", 8765)
+    await mgr.stop()
+
+    kwargs = captured["kwargs"]
+    assert kwargs["ping_interval"] == 20
+    assert kwargs["ping_timeout"] == 20
+    assert "ping_interval=20.0 ping_timeout=20.0" in caplog.text
 
 
 @pytest.mark.asyncio

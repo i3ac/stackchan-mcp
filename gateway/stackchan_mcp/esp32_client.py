@@ -39,8 +39,25 @@ logger = logging.getLogger(__name__)
 
 # Timeout for waiting for ESP32 responses
 RESPONSE_TIMEOUT = 10.0
-WEBSOCKET_PING_INTERVAL_S = 20
-WEBSOCKET_PING_TIMEOUT_S = 20
+WEBSOCKET_PING_INTERVAL_ENV = "STACKCHAN_GATEWAY_PING_INTERVAL_S"
+WEBSOCKET_PING_TIMEOUT_ENV = "STACKCHAN_GATEWAY_PING_TIMEOUT_S"
+
+
+def _resolve_gateway_ping_setting(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    value = raw.strip().lower()
+    if value in {"0", "false", "off", "none", "disabled"}:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        logger.warning("Invalid %s=%r; disabling gateway WebSocket ping", name, raw)
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
 
 ToolCall = tuple[str, dict[str, Any]]
 ToolCallResult = tuple[Any, dict[str, Any] | None]
@@ -570,21 +587,23 @@ class ESP32Manager:
                 "Device-driven listen capture enabled (audio hook %s)",
                 audio_hook_url,
             )
+        ping_interval = _resolve_gateway_ping_setting(WEBSOCKET_PING_INTERVAL_ENV)
+        ping_timeout = _resolve_gateway_ping_setting(WEBSOCKET_PING_TIMEOUT_ENV)
         logger.info(
             "ESP32 WebSocket server starting on ws://%s:%d "
             "ping_interval=%s ping_timeout=%s",
             host,
             port,
-            WEBSOCKET_PING_INTERVAL_S,
-            WEBSOCKET_PING_TIMEOUT_S,
+            ping_interval,
+            ping_timeout,
         )
         self._server = await websockets.serve(
             self._handler,
             host,
             port,
             process_request=self._check_auth,
-            ping_interval=WEBSOCKET_PING_INTERVAL_S,
-            ping_timeout=WEBSOCKET_PING_TIMEOUT_S,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
         )
 
     async def stop(self) -> None:

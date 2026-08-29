@@ -38,6 +38,11 @@ documented-only.
   
 ### Gateway
 
+- Disabled gateway-originated WebSocket pings by default so firmware-side
+  active keepalive can own liveness for StackChan devices; operators can
+  opt back in with `STACKCHAN_GATEWAY_PING_INTERVAL_S` and
+  `STACKCHAN_GATEWAY_PING_TIMEOUT_S`.
+
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
   alongside Irodori: official REST API with `eleven_v3` as the default
   model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
