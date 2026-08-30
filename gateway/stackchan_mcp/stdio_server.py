@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import os
+import time
 from typing import Any, Literal, cast
 
 import anyio
@@ -49,7 +50,7 @@ STACKCHAN_EVENT_INSTRUCTIONS = (
     "event_type ('touch'), subtype ('tap' or 'stroke'), "
     "duration_ms, ts, session_id. When such a notification "
     "arrives, react naturally using existing tools "
-    "(set_avatar, say, set_mouth, set_leds, move_head). There is "
+    "(set_avatar, say, set_mouth, set_leds, move_head, home_head). There is "
     "no dedicated reply tool — the existing tool palette is the "
     "reaction surface."
 )
@@ -57,7 +58,7 @@ STACKCHAN_CHANNEL_INSTRUCTIONS = (
     'Stack-chan physical events arrive as Channels notifications under '
     '<channel source="plugin:stackchanmcp:stackchanmcp" action="..." '
     'subtype="..." duration_ms="...">. React naturally using existing '
-    'tools (set_avatar, say, set_mouth, set_leds, move_head).'
+    'tools (set_avatar, say, set_mouth, set_leds, move_head, home_head).'
 )
 STACKCHAN_JSONL_INSTRUCTIONS = (
     "Stack-chan physical events are persisted to the JSONL log; host "
@@ -70,6 +71,9 @@ PRESET_DPS = {
     "high": 240,
 }
 SPEED_DPS_MAX = 10000
+HOME_HEAD_YAW_DEG = 0
+HOME_HEAD_PITCH_DEG = 5
+HOME_HEAD_SPEED_DPS = PRESET_DPS["low"]
 SPEED_DESCRIPTION = """speed (optional): How fast to move the head.
   - "low"  — slow, deliberate, ~30°/s. Good for curious tilts or gentle look-toward.
   - "mid"  — default natural turn, ~120°/s. Use for conversational eye contact.
@@ -528,7 +532,7 @@ async def _handle_follow_pose_stream(
     pitch_center_deg = (
         arguments["pitch_center_deg"]
         if "pitch_center_deg" in arguments
-        else resolve_default(tool_name, "pitch_center_deg", 45)
+        else resolve_default(tool_name, "pitch_center_deg", HOME_HEAD_PITCH_DEG)
     )
     if (
         not _is_int_arg(pitch_center_deg)
@@ -843,6 +847,9 @@ async def _dispatch_mcp_tool(
     gateway: Any,
 ) -> list[TextContent | ImageContent]:
     """Run one StackChan MCP tool against the provided gateway instance."""
+    if name == "get_stackchan_events":
+        return [TextContent(type="text", text=_stackchan_events_text(arguments))]
+
     if name == "get_status":
         status = gateway.esp32.get_status()
         return [TextContent(type="text", text=json.dumps(status, indent=2))]
@@ -927,6 +934,13 @@ async def _dispatch_mcp_tool(
                 ),
             )
         ]
+
+    if name == "home_head":
+        arguments = {
+            "yaw": HOME_HEAD_YAW_DEG,
+            "pitch": HOME_HEAD_PITCH_DEG,
+            "speed_dps": HOME_HEAD_SPEED_DPS,
+        }
 
     if name == "move_head":
         yaw_val = arguments.get("yaw")
@@ -1042,6 +1056,10 @@ async def _dispatch_mcp_tool(
             "self.robot.set_head_angles",
             arguments,
         ),
+        "home_head": (
+            "self.robot.set_head_angles",
+            arguments,
+        ),
         "get_head_angles": (
             "self.robot.get_head_angles",
             {},
@@ -1057,6 +1075,10 @@ async def _dispatch_mcp_tool(
         "check_vm_en": (
             "self.robot.check_vm_en",
             {},
+        ),
+        "set_wifi_power_save": (
+            "self.wifi.set_power_save",
+            arguments,
         ),
         "gateway_config_get": (
             "self.gateway_config.get",
@@ -1206,6 +1228,8 @@ async def _dispatch_mcp_tool(
                 joined = "\n".join(texts)
                 if name == "take_photo":
                     return _photo_contents(joined)
+                if name == "get_touch_state":
+                    return [TextContent(type="text", text=_touch_state_text(joined))]
                 return [TextContent(type="text", text=joined)]
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1218,6 +1242,165 @@ async def _dispatch_mcp_tool(
 #: camera JPEGs are a few KB, so this cap only guards against
 #: pathological captures.
 _PHOTO_INLINE_MAX_BYTES = 200 * 1024
+
+
+_RECENT_TOUCH_WINDOW_MS = 15_000
+
+
+def _stackchan_events_text(arguments: dict[str, Any]) -> str:
+    """Read recent firmware-originated events from the configured JSONL log."""
+    try:
+        limit = int(arguments.get("limit", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    limit = max(1, min(limit, 50))
+
+    try:
+        since_seconds = float(arguments.get("since_seconds", 300))
+    except (TypeError, ValueError):
+        since_seconds = 300.0
+    since_seconds = max(0.0, min(since_seconds, 86_400.0))
+
+    config = load_notify_config()
+    path = config.jsonl_path
+    now = time.time()
+    cutoff = now - since_seconds if since_seconds else 0.0
+    events: list[dict[str, Any]] = []
+
+    if not path.exists():
+        return json.dumps(
+            {
+                "ok": True,
+                "jsonl_enabled": config.jsonl_enabled,
+                "path": str(path),
+                "events": [],
+                "note": "No StackChan event log exists yet.",
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            lines = f.readlines()[-200:]
+    except OSError as exc:
+        return json.dumps(
+            {
+                "ok": False,
+                "jsonl_enabled": config.jsonl_enabled,
+                "path": str(path),
+                "error": str(exc),
+            },
+            ensure_ascii=False,
+        )
+
+    for raw in lines:
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        ts_unix = event.get("ts_unix")
+        if isinstance(ts_unix, bool) or not isinstance(ts_unix, (int, float)):
+            continue
+        if ts_unix < cutoff:
+            continue
+        event = dict(event)
+        event["age_seconds"] = round(max(0.0, now - float(ts_unix)), 3)
+        events.append(event)
+
+    events = events[-limit:]
+    return json.dumps(
+        {
+            "ok": True,
+            "jsonl_enabled": config.jsonl_enabled,
+            "path": str(path),
+            "since_seconds": since_seconds,
+            "limit": limit,
+            "events": events,
+            "latest_event": events[-1] if events else None,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _touch_state_text(result_text: str) -> str:
+    """Enrich get_touch_state with event-window fields for agent callers.
+
+    Firmware zone/raw values are instantaneous sensor samples, so they return
+    to zero immediately after a tap/stroke release. The last_event fields are
+    the durable gesture signal. Add explicit interpretation fields so callers
+    do not mistake "released now" for "no head touch happened".
+    """
+    try:
+        payload = json.loads(result_text)
+    except ValueError:
+        return result_text
+    if not isinstance(payload, dict):
+        return result_text
+
+    zones = [
+        bool(payload.get("zone0")),
+        bool(payload.get("zone1")),
+        bool(payload.get("zone2")),
+    ]
+    event_zones = [
+        bool(payload.get("last_event_zone0")),
+        bool(payload.get("last_event_zone1")),
+        bool(payload.get("last_event_zone2")),
+    ]
+    raw = int(payload.get("raw") or 0)
+    event_raw = int(payload.get("last_event_raw") or 0)
+    event = str(payload.get("last_event") or "idle")
+    try:
+        age_ms = int(payload.get("last_event_age_ms"))
+    except (TypeError, ValueError):
+        age_ms = -1
+
+    currently_touching = any(zones) or raw != 0
+    last_event_had_touch = any(event_zones) or event_raw != 0
+    last_event_is_touch = event in {"tap", "stroke"}
+    currently_touched_zones = [
+        f"zone{idx}" for idx, touched in enumerate(zones) if touched
+    ]
+    last_event_touched_zones = [
+        f"zone{idx}" for idx, touched in enumerate(event_zones) if touched
+    ]
+    recent_touch = (
+        currently_touching
+        or (last_event_is_touch and 0 <= age_ms <= _RECENT_TOUCH_WINDOW_MS)
+    )
+    payload["currently_touching"] = currently_touching
+    payload["currently_touched_zones"] = currently_touched_zones
+    payload["last_event_had_touch"] = last_event_had_touch
+    payload["last_event_is_touch"] = last_event_is_touch
+    payload["last_event_touched_zones"] = last_event_touched_zones
+    payload["recent_touch"] = recent_touch
+    payload["recent_touch_window_ms"] = _RECENT_TOUCH_WINDOW_MS
+    if currently_touching:
+        interpretation = "touching_now"
+        relevant_touched_zones = currently_touched_zones
+    elif recent_touch:
+        interpretation = "recent_touch_released"
+        relevant_touched_zones = last_event_touched_zones
+    elif last_event_is_touch:
+        interpretation = "past_touch_released"
+        relevant_touched_zones = last_event_touched_zones
+    else:
+        interpretation = "idle"
+        relevant_touched_zones = []
+    payload["interpretation"] = interpretation
+    payload["relevant_touched_zones"] = relevant_touched_zones
+    payload["note"] = (
+        "raw/zone are instantaneous and normally reset to zero after release; "
+        "use recent_touch/last_event for tap or head-stroke detection. On "
+        "newer firmware, last_event_zone*/last_event_raw show the touch-start "
+        "snapshot. When answering which zones were touched, use "
+        "currently_touched_zones, last_event_touched_zones, or "
+        "relevant_touched_zones exactly; do not infer extra zones from false "
+        "boolean fields."
+    )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _photo_contents(result_text: str) -> list[TextContent | ImageContent]:
@@ -1316,15 +1499,19 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
             Tool(
                 name="take_photo",
                 description=(
-                    "Take a photo with the robot's camera and ask a question about it. "
-                    "The device captures an image and returns an AI-generated description."
+                    "Take a photo with the robot's camera. The device captures an "
+                    "image and returns the saved JPEG path plus an inline image block."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "question": {
                             "type": "string",
-                            "description": "Question to ask about the photo (e.g. 'What do you see?')",
+                            "description": (
+                                "Pass an empty string to capture without image "
+                                "analysis. Non-empty questions require a configured "
+                                "vision/explain backend."
+                            ),
                         },
                     },
                     "required": ["question"],
@@ -1368,7 +1555,10 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "callers that need the firmware hard clamp (pitch 0..88), "
                     "use the firmware-side `set_head_angles` device tool, "
                     "which exposes a permissive schema and the authoritative "
-                    "two-tier guard described in the README."
+                    "two-tier guard described in the README. For requests like "
+                    "'return to home', 'initial position', or 'neutral pose', "
+                    "use `home_head`; this local StackChan's comfortable home "
+                    "pose is yaw=0, pitch=5, not pitch=45."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1406,12 +1596,24 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 },
             ),
             Tool(
+                name="home_head",
+                description=(
+                    "Return StackChan's head to the local comfortable home "
+                    "pose: yaw=0, pitch=5, slow speed. Use this whenever the "
+                    "user asks to return to the initial position, original "
+                    "position, home, rest, or neutral pose. Do not use "
+                    "pitch=45 for home on this device; that is a high head-up "
+                    "pose."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
                 name="stackchan_follow_pose_stream",
                 description=(
                     "Subscribes to an arbitrary upstream WebSocket pose-stream "
                     "using action=start, stop, or status. Sensor yaw is "
                     "forwarded 1:1 and clamped to +/-90 degrees; sensor "
-                    "pitch is shifted by pitch_center_deg (default 45) so "
+                    "pitch is shifted by pitch_center_deg (default 5) so "
                     "sensor neutral maps to head neutral, then clamped to "
                     "5..85 degrees. Inputs beyond the head's mechanical range "
                     "saturate at the limit without scaling. The subscriber "
@@ -1469,7 +1671,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                         "pitch_center_deg": {
                             "type": "integer",
-                            "default": 45,
+                            "default": HOME_HEAD_PITCH_DEG,
                             "minimum": 5,
                             "maximum": 85,
                             "description": (
@@ -1658,6 +1860,28 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "{io_expander_present, i2c_read_ok, raw, vm_en_high}."
                 ),
                 inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
+                name="set_wifi_power_save",
+                description=(
+                    "Set the ESP32 WiFi power-save mode at runtime. Use mode "
+                    "'none' to disable modem sleep for low-latency command "
+                    "streams, or 'min_modem' to restore the default light modem "
+                    "sleep. Returns {ok, previous, current}."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["none", "min_modem", "max_modem"],
+                            "description": (
+                                "WiFi power-save mode: none, min_modem, or max_modem."
+                            ),
+                        },
+                    },
+                    "required": ["mode"],
+                },
             ),
             Tool(
                 name="gateway_config_get",
@@ -1967,11 +2191,43 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 },
             ),
             Tool(
+                name="get_stackchan_events",
+                description=(
+                    "Read recent StackChan physical events persisted by the "
+                    "gateway JSONL event log, such as head tap/stroke events. "
+                    "Use this when the user asks whether StackChan was just "
+                    "touched or when reacting to recent head-touch events."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum events to return, 1..50. Default 10.",
+                            "minimum": 1,
+                            "maximum": 50,
+                        },
+                        "since_seconds": {
+                            "type": "number",
+                            "description": (
+                                "Only return events newer than this many seconds. "
+                                "Default 300; use 0 to disable age filtering."
+                            ),
+                            "minimum": 0,
+                            "maximum": 86400,
+                        },
+                    },
+                },
+            ),
+            Tool(
                 name="get_touch_state",
                 description=(
                     "Read the head-touch (Si12T) sensor state and the most recent "
                     "gesture event (tap/stroke/idle). Returns per-zone booleans, "
-                    "the raw output byte, and how long ago the last event fired."
+                    "the raw output byte, touched zone arrays, and how long ago "
+                    "the last event fired. When telling the user which zones were "
+                    "touched, quote the touched zone arrays exactly and do not "
+                    "invent zones whose boolean value is false."
                 ),
                 inputSchema={
                     "type": "object",

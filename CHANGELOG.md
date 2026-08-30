@@ -38,6 +38,11 @@ documented-only.
   
 ### Gateway
 
+- Disabled gateway-originated WebSocket pings by default so firmware-side
+  active keepalive can own liveness for StackChan devices; operators can
+  opt back in with `STACKCHAN_GATEWAY_PING_INTERVAL_S` and
+  `STACKCHAN_GATEWAY_PING_TIMEOUT_S`.
+
 - Added an ElevenLabs TTS engine (`STACKCHAN_TTS_ENGINE=elevenlabs`)
   alongside Irodori: official REST API with `eleven_v3` as the default
   model, per-speaker voice ids via `STACKCHAN_ELEVEN_VOICE_<SPEAKER>`
@@ -55,6 +60,14 @@ documented-only.
   polls and `connected` never reads false.
 
 ### Firmware
+
+- Added: active firmware-side WebSocket keepalive that detects silent
+  network breaks and triggers the existing reconnect path. A periodic
+  Ping (every 15 s) probes the connection; the Pong response refreshes
+  a liveness timestamp via the new `WebSocket::OnPong` callback
+  (esp-ml307 #49). If no frame of any kind arrives within 60 s, the
+  connection is considered dead and a graceful reconnect is forced —
+  no device reboot required. Closes #239.
 
 - Added an opt-in StackChan safe commissioning mode that holds servo power disabled and skips servo initialization for network and gateway diagnostics.
 

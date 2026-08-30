@@ -1,2 +1,2 @@
-# Safe commissioning build: servos powerless; network settings are configured on-device.
-CONFIG_STACKCHAN_SAFE_COMMISSIONING=y
+# Normal motion-enabled build: keep Wi-Fi/config on-device, but allow servo power and motion.
+CONFIG_STACKCHAN_SAFE_COMMISSIONING=n
