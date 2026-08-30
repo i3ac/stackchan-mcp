@@ -29,7 +29,7 @@ _SCHEMA_DEFAULTS: dict[str, dict[str, Any]] = {
         "speed_dps": 240,
         "flip_yaw": 1,
         "flip_pitch": 1,
-        "pitch_center_deg": 45,
+        "pitch_center_deg": 5,
     },
     _FOLLOW_LED_TOOL: {
         "target": "",

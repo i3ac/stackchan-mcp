@@ -50,7 +50,7 @@ STACKCHAN_EVENT_INSTRUCTIONS = (
     "event_type ('touch'), subtype ('tap' or 'stroke'), "
     "duration_ms, ts, session_id. When such a notification "
     "arrives, react naturally using existing tools "
-    "(set_avatar, say, set_mouth, set_leds, move_head). There is "
+    "(set_avatar, say, set_mouth, set_leds, move_head, home_head). There is "
     "no dedicated reply tool — the existing tool palette is the "
     "reaction surface."
 )
@@ -58,7 +58,7 @@ STACKCHAN_CHANNEL_INSTRUCTIONS = (
     'Stack-chan physical events arrive as Channels notifications under '
     '<channel source="plugin:stackchanmcp:stackchanmcp" action="..." '
     'subtype="..." duration_ms="...">. React naturally using existing '
-    'tools (set_avatar, say, set_mouth, set_leds, move_head).'
+    'tools (set_avatar, say, set_mouth, set_leds, move_head, home_head).'
 )
 STACKCHAN_JSONL_INSTRUCTIONS = (
     "Stack-chan physical events are persisted to the JSONL log; host "
@@ -71,6 +71,9 @@ PRESET_DPS = {
     "high": 240,
 }
 SPEED_DPS_MAX = 10000
+HOME_HEAD_YAW_DEG = 0
+HOME_HEAD_PITCH_DEG = 5
+HOME_HEAD_SPEED_DPS = PRESET_DPS["low"]
 SPEED_DESCRIPTION = """speed (optional): How fast to move the head.
   - "low"  — slow, deliberate, ~30°/s. Good for curious tilts or gentle look-toward.
   - "mid"  — default natural turn, ~120°/s. Use for conversational eye contact.
@@ -529,7 +532,7 @@ async def _handle_follow_pose_stream(
     pitch_center_deg = (
         arguments["pitch_center_deg"]
         if "pitch_center_deg" in arguments
-        else resolve_default(tool_name, "pitch_center_deg", 45)
+        else resolve_default(tool_name, "pitch_center_deg", HOME_HEAD_PITCH_DEG)
     )
     if (
         not _is_int_arg(pitch_center_deg)
@@ -932,6 +935,13 @@ async def _dispatch_mcp_tool(
             )
         ]
 
+    if name == "home_head":
+        arguments = {
+            "yaw": HOME_HEAD_YAW_DEG,
+            "pitch": HOME_HEAD_PITCH_DEG,
+            "speed_dps": HOME_HEAD_SPEED_DPS,
+        }
+
     if name == "move_head":
         yaw_val = arguments.get("yaw")
         pitch_val = arguments.get("pitch")
@@ -1043,6 +1053,10 @@ async def _dispatch_mcp_tool(
             arguments,
         ),
         "move_head": (
+            "self.robot.set_head_angles",
+            arguments,
+        ),
+        "home_head": (
             "self.robot.set_head_angles",
             arguments,
         ),
@@ -1541,7 +1555,10 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                     "callers that need the firmware hard clamp (pitch 0..88), "
                     "use the firmware-side `set_head_angles` device tool, "
                     "which exposes a permissive schema and the authoritative "
-                    "two-tier guard described in the README."
+                    "two-tier guard described in the README. For requests like "
+                    "'return to home', 'initial position', or 'neutral pose', "
+                    "use `home_head`; this local StackChan's comfortable home "
+                    "pose is yaw=0, pitch=5, not pitch=45."
                 ),
                 inputSchema={
                     "type": "object",
@@ -1579,12 +1596,24 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 },
             ),
             Tool(
+                name="home_head",
+                description=(
+                    "Return StackChan's head to the local comfortable home "
+                    "pose: yaw=0, pitch=5, slow speed. Use this whenever the "
+                    "user asks to return to the initial position, original "
+                    "position, home, rest, or neutral pose. Do not use "
+                    "pitch=45 for home on this device; that is a high head-up "
+                    "pose."
+                ),
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            Tool(
                 name="stackchan_follow_pose_stream",
                 description=(
                     "Subscribes to an arbitrary upstream WebSocket pose-stream "
                     "using action=start, stop, or status. Sensor yaw is "
                     "forwarded 1:1 and clamped to +/-90 degrees; sensor "
-                    "pitch is shifted by pitch_center_deg (default 45) so "
+                    "pitch is shifted by pitch_center_deg (default 5) so "
                     "sensor neutral maps to head neutral, then clamped to "
                     "5..85 degrees. Inputs beyond the head's mechanical range "
                     "saturate at the limit without scaling. The subscriber "
@@ -1642,7 +1671,7 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                         },
                         "pitch_center_deg": {
                             "type": "integer",
-                            "default": 45,
+                            "default": HOME_HEAD_PITCH_DEG,
                             "minimum": 5,
                             "maximum": 85,
                             "description": (

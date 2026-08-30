@@ -22,6 +22,7 @@ from .wifi_power_save import (
 
 SERVO_YAW_MIN, SERVO_YAW_MAX = -90, 90
 SERVO_PITCH_MIN, SERVO_PITCH_MAX = 5, 85
+SERVO_HOME_PITCH_DEG = 5
 SERVO_MAX_SPEED_DPS = 240
 
 
@@ -45,7 +46,7 @@ class FollowPoseStreamConfig:
     frame_filter: Optional[str] = None
     flip_yaw: int = 1
     flip_pitch: int = 1
-    pitch_center_deg: int = 45
+    pitch_center_deg: int = SERVO_HOME_PITCH_DEG
     downsample_hz: float = 20.0
     max_step_deg: float = 12.0
     speed_dps: int = 240
