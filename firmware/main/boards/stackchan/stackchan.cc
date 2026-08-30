@@ -6371,12 +6371,13 @@ private:
             });
 
         // Phase 7: head-touch (Si12T). Returns the latest debounced zone
-        // states plus the most recent gesture event. Polled by the MCP client
-        // to notice TAP/STROKE on the head without holding open a stream.
+        // states plus the most recent gesture event. last_event_zone*/raw keep
+        // the rising-edge snapshot so callers can still inspect which zone was
+        // touched after the sensor has been released and current raw returns 0.
         mcp_server.AddTool(
             "self.touch.get_touch_state",
             "Get the current head-touch sensor state and last gesture event "
-            "(tap/stroke/idle) with its age in milliseconds.",
+            "(tap/stroke/idle), including the event-start zone/raw snapshot.",
             PropertyList(),
             [this](const PropertyList& properties) -> ReturnValue {
                 cJSON* root = cJSON_CreateObject();
@@ -6385,6 +6386,10 @@ private:
                 cJSON_AddBoolToObject(root, "zone1", last_zone_snapshot_[1]);
                 cJSON_AddBoolToObject(root, "zone2", last_zone_snapshot_[2]);
                 cJSON_AddNumberToObject(root, "raw", last_output1_raw_);
+                cJSON_AddBoolToObject(root, "last_event_zone0", press_start_zones_[0]);
+                cJSON_AddBoolToObject(root, "last_event_zone1", press_start_zones_[1]);
+                cJSON_AddBoolToObject(root, "last_event_zone2", press_start_zones_[2]);
+                cJSON_AddNumberToObject(root, "last_event_raw", press_start_output1_raw_);
                 const char* ev = "idle";
                 switch (last_event_) {
                     case TouchEvent::TAP:    ev = "tap";    break;

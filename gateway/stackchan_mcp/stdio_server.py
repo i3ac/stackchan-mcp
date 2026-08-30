@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import os
+import time
 from typing import Any, Literal, cast
 
 import anyio
@@ -843,6 +844,9 @@ async def _dispatch_mcp_tool(
     gateway: Any,
 ) -> list[TextContent | ImageContent]:
     """Run one StackChan MCP tool against the provided gateway instance."""
+    if name == "get_stackchan_events":
+        return [TextContent(type="text", text=_stackchan_events_text(arguments))]
+
     if name == "get_status":
         status = gateway.esp32.get_status()
         return [TextContent(type="text", text=json.dumps(status, indent=2))]
@@ -1058,6 +1062,10 @@ async def _dispatch_mcp_tool(
             "self.robot.check_vm_en",
             {},
         ),
+        "set_wifi_power_save": (
+            "self.wifi.set_power_save",
+            arguments,
+        ),
         "gateway_config_get": (
             "self.gateway_config.get",
             {},
@@ -1206,6 +1214,8 @@ async def _dispatch_mcp_tool(
                 joined = "\n".join(texts)
                 if name == "take_photo":
                     return _photo_contents(joined)
+                if name == "get_touch_state":
+                    return [TextContent(type="text", text=_touch_state_text(joined))]
                 return [TextContent(type="text", text=joined)]
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1218,6 +1228,165 @@ async def _dispatch_mcp_tool(
 #: camera JPEGs are a few KB, so this cap only guards against
 #: pathological captures.
 _PHOTO_INLINE_MAX_BYTES = 200 * 1024
+
+
+_RECENT_TOUCH_WINDOW_MS = 15_000
+
+
+def _stackchan_events_text(arguments: dict[str, Any]) -> str:
+    """Read recent firmware-originated events from the configured JSONL log."""
+    try:
+        limit = int(arguments.get("limit", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    limit = max(1, min(limit, 50))
+
+    try:
+        since_seconds = float(arguments.get("since_seconds", 300))
+    except (TypeError, ValueError):
+        since_seconds = 300.0
+    since_seconds = max(0.0, min(since_seconds, 86_400.0))
+
+    config = load_notify_config()
+    path = config.jsonl_path
+    now = time.time()
+    cutoff = now - since_seconds if since_seconds else 0.0
+    events: list[dict[str, Any]] = []
+
+    if not path.exists():
+        return json.dumps(
+            {
+                "ok": True,
+                "jsonl_enabled": config.jsonl_enabled,
+                "path": str(path),
+                "events": [],
+                "note": "No StackChan event log exists yet.",
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            lines = f.readlines()[-200:]
+    except OSError as exc:
+        return json.dumps(
+            {
+                "ok": False,
+                "jsonl_enabled": config.jsonl_enabled,
+                "path": str(path),
+                "error": str(exc),
+            },
+            ensure_ascii=False,
+        )
+
+    for raw in lines:
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        ts_unix = event.get("ts_unix")
+        if isinstance(ts_unix, bool) or not isinstance(ts_unix, (int, float)):
+            continue
+        if ts_unix < cutoff:
+            continue
+        event = dict(event)
+        event["age_seconds"] = round(max(0.0, now - float(ts_unix)), 3)
+        events.append(event)
+
+    events = events[-limit:]
+    return json.dumps(
+        {
+            "ok": True,
+            "jsonl_enabled": config.jsonl_enabled,
+            "path": str(path),
+            "since_seconds": since_seconds,
+            "limit": limit,
+            "events": events,
+            "latest_event": events[-1] if events else None,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _touch_state_text(result_text: str) -> str:
+    """Enrich get_touch_state with event-window fields for agent callers.
+
+    Firmware zone/raw values are instantaneous sensor samples, so they return
+    to zero immediately after a tap/stroke release. The last_event fields are
+    the durable gesture signal. Add explicit interpretation fields so callers
+    do not mistake "released now" for "no head touch happened".
+    """
+    try:
+        payload = json.loads(result_text)
+    except ValueError:
+        return result_text
+    if not isinstance(payload, dict):
+        return result_text
+
+    zones = [
+        bool(payload.get("zone0")),
+        bool(payload.get("zone1")),
+        bool(payload.get("zone2")),
+    ]
+    event_zones = [
+        bool(payload.get("last_event_zone0")),
+        bool(payload.get("last_event_zone1")),
+        bool(payload.get("last_event_zone2")),
+    ]
+    raw = int(payload.get("raw") or 0)
+    event_raw = int(payload.get("last_event_raw") or 0)
+    event = str(payload.get("last_event") or "idle")
+    try:
+        age_ms = int(payload.get("last_event_age_ms"))
+    except (TypeError, ValueError):
+        age_ms = -1
+
+    currently_touching = any(zones) or raw != 0
+    last_event_had_touch = any(event_zones) or event_raw != 0
+    last_event_is_touch = event in {"tap", "stroke"}
+    currently_touched_zones = [
+        f"zone{idx}" for idx, touched in enumerate(zones) if touched
+    ]
+    last_event_touched_zones = [
+        f"zone{idx}" for idx, touched in enumerate(event_zones) if touched
+    ]
+    recent_touch = (
+        currently_touching
+        or (last_event_is_touch and 0 <= age_ms <= _RECENT_TOUCH_WINDOW_MS)
+    )
+    payload["currently_touching"] = currently_touching
+    payload["currently_touched_zones"] = currently_touched_zones
+    payload["last_event_had_touch"] = last_event_had_touch
+    payload["last_event_is_touch"] = last_event_is_touch
+    payload["last_event_touched_zones"] = last_event_touched_zones
+    payload["recent_touch"] = recent_touch
+    payload["recent_touch_window_ms"] = _RECENT_TOUCH_WINDOW_MS
+    if currently_touching:
+        interpretation = "touching_now"
+        relevant_touched_zones = currently_touched_zones
+    elif recent_touch:
+        interpretation = "recent_touch_released"
+        relevant_touched_zones = last_event_touched_zones
+    elif last_event_is_touch:
+        interpretation = "past_touch_released"
+        relevant_touched_zones = last_event_touched_zones
+    else:
+        interpretation = "idle"
+        relevant_touched_zones = []
+    payload["interpretation"] = interpretation
+    payload["relevant_touched_zones"] = relevant_touched_zones
+    payload["note"] = (
+        "raw/zone are instantaneous and normally reset to zero after release; "
+        "use recent_touch/last_event for tap or head-stroke detection. On "
+        "newer firmware, last_event_zone*/last_event_raw show the touch-start "
+        "snapshot. When answering which zones were touched, use "
+        "currently_touched_zones, last_event_touched_zones, or "
+        "relevant_touched_zones exactly; do not infer extra zones from false "
+        "boolean fields."
+    )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _photo_contents(result_text: str) -> list[TextContent | ImageContent]:
@@ -1316,15 +1485,19 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
             Tool(
                 name="take_photo",
                 description=(
-                    "Take a photo with the robot's camera and ask a question about it. "
-                    "The device captures an image and returns an AI-generated description."
+                    "Take a photo with the robot's camera. The device captures an "
+                    "image and returns the saved JPEG path plus an inline image block."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "question": {
                             "type": "string",
-                            "description": "Question to ask about the photo (e.g. 'What do you see?')",
+                            "description": (
+                                "Pass an empty string to capture without image "
+                                "analysis. Non-empty questions require a configured "
+                                "vision/explain backend."
+                            ),
                         },
                     },
                     "required": ["question"],
@@ -1660,6 +1833,28 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 inputSchema={"type": "object", "properties": {}},
             ),
             Tool(
+                name="set_wifi_power_save",
+                description=(
+                    "Set the ESP32 WiFi power-save mode at runtime. Use mode "
+                    "'none' to disable modem sleep for low-latency command "
+                    "streams, or 'min_modem' to restore the default light modem "
+                    "sleep. Returns {ok, previous, current}."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["none", "min_modem", "max_modem"],
+                            "description": (
+                                "WiFi power-save mode: none, min_modem, or max_modem."
+                            ),
+                        },
+                    },
+                    "required": ["mode"],
+                },
+            ),
+            Tool(
                 name="gateway_config_get",
                 description=(
                     "Read the device's NVS-backed WebSocket gateway "
@@ -1967,11 +2162,43 @@ def create_server(notify_config: NotifyConfig | None = None) -> StackChanServer:
                 },
             ),
             Tool(
+                name="get_stackchan_events",
+                description=(
+                    "Read recent StackChan physical events persisted by the "
+                    "gateway JSONL event log, such as head tap/stroke events. "
+                    "Use this when the user asks whether StackChan was just "
+                    "touched or when reacting to recent head-touch events."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum events to return, 1..50. Default 10.",
+                            "minimum": 1,
+                            "maximum": 50,
+                        },
+                        "since_seconds": {
+                            "type": "number",
+                            "description": (
+                                "Only return events newer than this many seconds. "
+                                "Default 300; use 0 to disable age filtering."
+                            ),
+                            "minimum": 0,
+                            "maximum": 86400,
+                        },
+                    },
+                },
+            ),
+            Tool(
                 name="get_touch_state",
                 description=(
                     "Read the head-touch (Si12T) sensor state and the most recent "
                     "gesture event (tap/stroke/idle). Returns per-zone booleans, "
-                    "the raw output byte, and how long ago the last event fired."
+                    "the raw output byte, touched zone arrays, and how long ago "
+                    "the last event fired. When telling the user which zones were "
+                    "touched, quote the touched zone arrays exactly and do not "
+                    "invent zones whose boolean value is false."
                 ),
                 inputSchema={
                     "type": "object",
